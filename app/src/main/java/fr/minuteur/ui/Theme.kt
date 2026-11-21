@@ -11,6 +11,7 @@ val Cream = Color(0xFFFFF8F0)
 val Ink = Color(0xFF2B2118)
 val InkSoft = Color(0xFF6B5E55)
 val Coral = Color(0xFFFF6B4A)
+val Gold = Color(0xFFF5B400)
 
 data class TimerColors(val container: Color, val accent: Color)
 

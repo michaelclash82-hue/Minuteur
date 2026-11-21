@@ -20,6 +20,8 @@ data class KitchenTimer(
     val remainingMs: Long,
     val state: TimerState,
     val colorIndex: Int,
+    /** Durée choisie au lancement (sans les « +1 min »), pour les favoris. */
+    val baseMs: Long = totalMs,
 ) {
     fun remaining(now: Long): Long = when (state) {
         TimerState.RUNNING -> (endAt - now).coerceAtLeast(0L)
@@ -33,6 +35,12 @@ data class KitchenTimer(
 
 const val COLOR_COUNT = 7
 
+/** Un minuteur enregistré : favori ou récent. */
+data class Preset(val label: String, val durationMs: Long) {
+    fun sameAs(label: String, durationMs: Long) =
+        this.label.equals(label, ignoreCase = true) && this.durationMs == durationMs
+}
+
 /**
  * Source unique de vérité pour les minuteurs. Sauvegarde dans les préférences
  * et synchronise les alarmes système et les notifications à chaque changement.
@@ -40,7 +48,8 @@ const val COLOR_COUNT = 7
 object TimerRepository {
     private const val PREFS = "minuteur"
     private const val KEY_TIMERS = "timers"
-    private const val KEY_RECENT = "recent"
+    private const val KEY_RECENTS = "recents2"
+    private const val KEY_FAVORITES = "favorites"
     private const val KEY_NEXT_ID = "nextId"
 
     private lateinit var app: Context
@@ -49,8 +58,11 @@ object TimerRepository {
     private val _timers = MutableStateFlow<List<KitchenTimer>>(emptyList())
     val timers: StateFlow<List<KitchenTimer>> = _timers.asStateFlow()
 
-    private val _recent = MutableStateFlow<List<String>>(emptyList())
-    val recentLabels: StateFlow<List<String>> = _recent.asStateFlow()
+    private val _recents = MutableStateFlow<List<Preset>>(emptyList())
+    val recents: StateFlow<List<Preset>> = _recents.asStateFlow()
+
+    private val _favorites = MutableStateFlow<List<Preset>>(emptyList())
+    val favorites: StateFlow<List<Preset>> = _favorites.asStateFlow()
 
     @Synchronized
     fun init(context: Context) {
@@ -58,12 +70,13 @@ object TimerRepository {
         app = context.applicationContext
         prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         _timers.value = loadTimers()
-        _recent.value = loadRecent()
+        _recents.value = loadPresets(KEY_RECENTS)
+        _favorites.value = loadPresets(KEY_FAVORITES)
     }
 
     @Synchronized
-    fun add(label: String, durationMs: Long) {
-        if (durationMs <= 0L) return
+    fun add(label: String, durationMs: Long): KitchenTimer? {
+        if (durationMs <= 0L) return null
         val id = prefs.getInt(KEY_NEXT_ID, 1)
         prefs.edit().putInt(KEY_NEXT_ID, id + 1).commit()
 
@@ -84,10 +97,68 @@ object TimerRepository {
         applySideEffects(id, timer)
 
         if (clean.isNotEmpty()) {
-            val recent = (listOf(clean) + _recent.value.filterNot { it.equals(clean, ignoreCase = true) }).take(8)
-            _recent.value = recent
-            prefs.edit().putString(KEY_RECENT, JSONArray(recent).toString()).commit()
+            val recents = (listOf(Preset(clean, durationMs)) +
+                _recents.value.filterNot { it.label.equals(clean, ignoreCase = true) }).take(10)
+            _recents.value = recents
+            savePresets(KEY_RECENTS, recents)
         }
+        return timer
+    }
+
+    fun rename(id: Int, label: String) {
+        val clean = label.trim()
+        if (clean.isEmpty()) return
+        update(id) { it.copy(label = clean.take(40)) }
+    }
+
+    /** Remet un minuteur supprimé (bouton « Annuler »). */
+    @Synchronized
+    fun restore(timer: KitchenTimer) {
+        if (_timers.value.any { it.id == timer.id }) return
+        commit(_timers.value + timer)
+        applySideEffects(timer.id, timer)
+    }
+
+    // ---- Favoris ----
+
+    fun isFavorite(label: String, durationMs: Long) =
+        _favorites.value.any { it.sameAs(label, durationMs) }
+
+    @Synchronized
+    fun addFavorite(label: String, durationMs: Long) {
+        val clean = label.trim()
+        if (clean.isEmpty() || durationMs <= 0L || isFavorite(clean, durationMs)) return
+        setFavorites(_favorites.value + Preset(clean, durationMs))
+    }
+
+    @Synchronized
+    fun removeFavorite(preset: Preset) {
+        setFavorites(_favorites.value.filterNot { it.sameAs(preset.label, preset.durationMs) })
+    }
+
+    @Synchronized
+    fun updateFavorite(old: Preset, new: Preset) {
+        val clean = new.copy(label = new.label.trim())
+        if (clean.label.isEmpty() || clean.durationMs <= 0L) return
+        setFavorites(
+            _favorites.value
+                .map { if (it.sameAs(old.label, old.durationMs)) clean else it }
+                .distinctBy { it.label.lowercase() to it.durationMs }
+        )
+    }
+
+    /** Renvoie true si le minuteur vient d'être ajouté aux favoris. */
+    @Synchronized
+    fun toggleFavorite(label: String, durationMs: Long): Boolean =
+        if (isFavorite(label, durationMs)) {
+            removeFavorite(Preset(label, durationMs)); false
+        } else {
+            addFavorite(label, durationMs); true
+        }
+
+    private fun setFavorites(list: List<Preset>) {
+        _favorites.value = list
+        savePresets(KEY_FAVORITES, list)
     }
 
     fun pause(id: Int) = update(id) { t ->
@@ -202,6 +273,7 @@ object TimerRepository {
                     .put("remaining", it.remainingMs)
                     .put("state", it.state.name)
                     .put("color", it.colorIndex)
+                    .put("base", it.baseMs)
             )
         }
         prefs.edit().putString(KEY_TIMERS, arr.toString()).commit()
@@ -211,23 +283,34 @@ object TimerRepository {
         val arr = JSONArray(prefs.getString(KEY_TIMERS, "[]"))
         (0 until arr.length()).map { i ->
             val o = arr.getJSONObject(i)
+            val total = o.getLong("total")
             KitchenTimer(
                 id = o.getInt("id"),
                 label = o.getString("label"),
-                totalMs = o.getLong("total"),
+                totalMs = total,
                 endAt = o.getLong("endAt"),
                 remainingMs = o.getLong("remaining"),
                 state = TimerState.valueOf(o.getString("state")),
                 colorIndex = o.optInt("color", 0),
+                baseMs = o.optLong("base", total),
             )
         }
     } catch (e: Exception) {
         emptyList()
     }
 
-    private fun loadRecent(): List<String> = try {
-        val arr = JSONArray(prefs.getString(KEY_RECENT, "[]"))
-        (0 until arr.length()).map { arr.getString(it) }
+    private fun savePresets(key: String, list: List<Preset>) {
+        val arr = JSONArray()
+        list.forEach { arr.put(JSONObject().put("label", it.label).put("ms", it.durationMs)) }
+        prefs.edit().putString(key, arr.toString()).commit()
+    }
+
+    private fun loadPresets(key: String): List<Preset> = try {
+        val arr = JSONArray(prefs.getString(key, "[]"))
+        (0 until arr.length()).map {
+            val o = arr.getJSONObject(it)
+            Preset(o.getString("label"), o.getLong("ms"))
+        }
     } catch (e: Exception) {
         emptyList()
     }

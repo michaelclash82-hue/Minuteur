@@ -6,6 +6,9 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -32,9 +35,12 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material.icons.rounded.Notifications
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Warning
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -51,6 +57,11 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -78,6 +89,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import fr.minuteur.KitchenTimer
+import fr.minuteur.Preset
 import fr.minuteur.SetupItem
 import fr.minuteur.TimerRepository
 import fr.minuteur.TimerState
@@ -88,9 +100,21 @@ import kotlinx.coroutines.launch
 @Composable
 fun MinuteurApp(missingSetup: List<SetupItem>, onFixSetup: (SetupItem) -> Unit) {
     val timers by TimerRepository.timers.collectAsState()
-    val recent by TimerRepository.recentLabels.collectAsState()
+    val recents by TimerRepository.recents.collectAsState()
+    val favorites by TimerRepository.favorites.collectAsState()
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var showSheet by rememberSaveable { mutableStateOf(false) }
+    var renaming by remember { mutableStateOf<KitchenTimer?>(null) }
+    val snackbar = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+
+    fun notify(message: String, undo: (() -> Unit)? = null) {
+        snackbar.currentSnackbarData?.dismiss()
+        scope.launch {
+            val result = snackbar.showSnackbar(message, actionLabel = if (undo != null) "Annuler" else null)
+            if (result == SnackbarResult.ActionPerformed) undo?.invoke()
+        }
+    }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -112,6 +136,7 @@ fun MinuteurApp(missingSetup: List<SetupItem>, onFixSetup: (SetupItem) -> Unit) 
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
+        snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             Column(
                 Modifier
@@ -155,15 +180,32 @@ fun MinuteurApp(missingSetup: List<SetupItem>, onFixSetup: (SetupItem) -> Unit) 
                 item(key = "empty") { EmptyState() }
             }
             items(sorted, key = { it.id }) { t ->
+                val isFavorite = favorites.any { it.sameAs(t.label, t.baseMs) }
                 TimerCard(
                     timer = t,
                     now = now,
+                    isFavorite = isFavorite,
                     onToggle = {
                         if (t.state == TimerState.RUNNING) TimerRepository.pause(t.id)
                         else TimerRepository.resume(t.id)
                     },
                     onAddMinute = { TimerRepository.addMinute(t.id) },
-                    onDelete = { TimerRepository.delete(t.id) },
+                    onStop = { TimerRepository.delete(t.id) },
+                    onDelete = {
+                        TimerRepository.delete(t.id)
+                        // Un minuteur terminé qu'on supprime = sonnerie arrêtée, rien à annuler.
+                        if (t.state != TimerState.FINISHED) {
+                            notify("« ${t.label} » supprimé") { TimerRepository.restore(t) }
+                        }
+                    },
+                    onRename = { renaming = t },
+                    onToggleFavorite = {
+                        val added = TimerRepository.toggleFavorite(t.label, t.baseMs)
+                        notify(
+                            if (added) "« ${t.label} » ajouté aux favoris (${formatDuration(t.baseMs)})"
+                            else "« ${t.label} » retiré des favoris"
+                        )
+                    },
                     modifier = Modifier.animateItem(),
                 )
             }
@@ -172,11 +214,57 @@ fun MinuteurApp(missingSetup: List<SetupItem>, onFixSetup: (SetupItem) -> Unit) 
 
     if (showSheet) {
         AddTimerSheet(
-            recent = recent,
+            favorites = favorites,
+            recents = recents.filter { r -> favorites.none { it.sameAs(r.label, r.durationMs) } }.take(3),
             onDismiss = { showSheet = false },
-            onStart = { label, ms -> TimerRepository.add(label, ms) },
+            onStart = { label, ms, keep ->
+                val t = TimerRepository.add(label, ms)
+                if (keep && t != null) TimerRepository.addFavorite(t.label, ms)
+            },
         )
     }
+
+    renaming?.let { t ->
+        RenameDialog(
+            initial = t.label,
+            onDismiss = { renaming = null },
+            onConfirm = { name ->
+                TimerRepository.rename(t.id, name)
+                renaming = null
+            },
+        )
+    }
+}
+
+@Composable
+private fun RenameDialog(initial: String, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
+    var name by rememberSaveable { mutableStateOf(initial) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Cream,
+        title = { Text("Renommer") },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it.take(40) },
+                singleLine = true,
+                shape = RoundedCornerShape(16.dp),
+                keyboardOptions = KeyboardOptions(
+                    capitalization = KeyboardCapitalization.Sentences,
+                    imeAction = ImeAction.Done,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(name) }, enabled = name.isNotBlank()) {
+                Text("OK", fontWeight = FontWeight.Bold, color = Coral)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Annuler", color = InkSoft) }
+        },
+    )
 }
 
 @Composable
@@ -249,9 +337,13 @@ private fun SetupCard(missing: List<SetupItem>, onFix: (SetupItem) -> Unit) {
 private fun TimerCard(
     timer: KitchenTimer,
     now: Long,
+    isFavorite: Boolean,
     onToggle: () -> Unit,
     onAddMinute: () -> Unit,
+    onStop: () -> Unit,
     onDelete: () -> Unit,
+    onRename: () -> Unit,
+    onToggleFavorite: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val colors = TimerPalette[timer.colorIndex.mod(TimerPalette.size)]
@@ -285,14 +377,38 @@ private fun TimerCard(
                         .background(if (finished) Color.White else colors.accent)
                 )
                 Spacer(Modifier.width(10.dp))
-                Text(
-                    timer.label,
-                    style = MaterialTheme.typography.titleLarge,
-                    color = Ink,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                )
+                // Appui sur le nom : renommer.
+                Row(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable(onClick = onRename)
+                        .padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        timer.label,
+                        style = MaterialTheme.typography.titleLarge,
+                        color = Ink,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Icon(
+                        Icons.Rounded.Edit,
+                        contentDescription = "Renommer",
+                        tint = InkSoft.copy(alpha = 0.6f),
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+                IconButton(onClick = onToggleFavorite) {
+                    Icon(
+                        Icons.Rounded.Star,
+                        contentDescription = if (isFavorite) "Retirer des favoris" else "Ajouter aux favoris",
+                        tint = if (isFavorite) Gold else InkSoft.copy(alpha = 0.35f),
+                    )
+                }
                 IconButton(onClick = onDelete) {
                     Icon(Icons.Rounded.Close, contentDescription = "Supprimer", tint = InkSoft)
                 }
@@ -309,7 +425,7 @@ private fun TimerCard(
                     Spacer(Modifier.height(14.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Button(
-                            onClick = onDelete,
+                            onClick = onStop,
                             modifier = Modifier
                                 .weight(1f)
                                 .height(60.dp),
@@ -401,19 +517,21 @@ private fun quickLabel(m: Int): String = when {
     else -> "${m / 60} h ${m % 60}"
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun AddTimerSheet(
-    recent: List<String>,
+    favorites: List<Preset>,
+    recents: List<Preset>,
     onDismiss: () -> Unit,
-    onStart: (String, Long) -> Unit,
+    onStart: (label: String, durationMs: Long, keepAsFavorite: Boolean) -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val scope = rememberCoroutineScope()
     var label by rememberSaveable { mutableStateOf("") }
-    var minutes by rememberSaveable { mutableIntStateOf(10) }
-    var seconds by rememberSaveable { mutableIntStateOf(0) }
-    val totalMs = (minutes * 60L + seconds) * 1000L
+    var seconds by rememberSaveable { mutableIntStateOf(10 * 60) }
+    var keep by rememberSaveable { mutableStateOf(false) }
+    var editing by remember { mutableStateOf<Preset?>(null) }
+    val totalMs = seconds * 1000L
 
     fun close(then: () -> Unit = {}) {
         scope.launch { sheetState.hide() }.invokeOnCompletion {
@@ -435,8 +553,67 @@ private fun AddTimerSheet(
                 .padding(start = 20.dp, end = 20.dp, bottom = 28.dp)
         ) {
             Text("Nouveau minuteur", style = MaterialTheme.typography.headlineSmall, color = Ink)
-            Spacer(Modifier.height(16.dp))
 
+            // Favoris : un appui lance directement, appui long pour modifier.
+            if (favorites.isNotEmpty()) {
+                Spacer(Modifier.height(14.dp))
+                SectionTitle("Mes favoris")
+                Row(
+                    Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    favorites.forEach { f ->
+                        Column(
+                            Modifier
+                                .clip(RoundedCornerShape(18.dp))
+                                .background(Color.White)
+                                .combinedClickable(
+                                    onClick = { close { onStart(f.label, f.durationMs, false) } },
+                                    onLongClick = { editing = f },
+                                )
+                                .padding(horizontal = 16.dp, vertical = 10.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Rounded.Star, null, tint = Gold, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text(f.label, fontWeight = FontWeight.SemiBold, color = Ink, maxLines = 1)
+                            }
+                            Text(formatDuration(f.durationMs), color = InkSoft, style = MaterialTheme.typography.bodyMedium)
+                        }
+                    }
+                }
+                Text(
+                    "Appui : lancer · appui long : modifier",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = InkSoft.copy(alpha = 0.7f),
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+
+            // Récents : un appui remplit le nom et la durée.
+            if (recents.isNotEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                SectionTitle("Récents")
+                Row(
+                    Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    recents.forEach { r ->
+                        FilledTonalButton(
+                            onClick = {
+                                label = r.label
+                                seconds = (r.durationMs / 1000L).toInt().coerceIn(1, MAX_SECONDS)
+                            },
+                            shape = RoundedCornerShape(14.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                        ) {
+                            Text("${r.label} · ${formatDuration(r.durationMs)}", maxLines = 1)
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
             OutlinedTextField(
                 value = label,
                 onValueChange = { label = it.take(40) },
@@ -451,76 +628,64 @@ private fun AddTimerSheet(
                 modifier = Modifier.fillMaxWidth(),
             )
 
-            if (recent.isNotEmpty()) {
-                Spacer(Modifier.height(10.dp))
-                Row(
-                    Modifier.horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    recent.forEach { r ->
-                        FilledTonalButton(
-                            onClick = { label = r },
-                            shape = RoundedCornerShape(14.dp),
-                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
-                        ) { Text(r) }
+            Spacer(Modifier.height(16.dp))
+            DurationWheels(totalSeconds = seconds, onChange = { seconds = it })
+
+            Spacer(Modifier.height(14.dp))
+            Row(
+                Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                QuickMinutes.forEach { m ->
+                    val selected = seconds == m * 60
+                    Button(
+                        onClick = { seconds = m * 60 },
+                        modifier = Modifier.height(44.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        contentPadding = PaddingValues(horizontal = 14.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (selected) Coral else Color.White,
+                            contentColor = if (selected) Color.White else Ink,
+                        ),
+                    ) {
+                        Text(quickLabel(m), fontWeight = FontWeight.SemiBold, maxLines = 1)
                     }
                 }
             }
-
-            Spacer(Modifier.height(20.dp))
-            Text(
-                formatDuration(totalMs),
-                fontSize = 60.sp,
-                fontWeight = FontWeight.ExtraBold,
-                color = Ink,
-                textAlign = TextAlign.Center,
-                style = MaterialTheme.typography.displayLarge.copy(fontFeatureSettings = "tnum"),
-                modifier = Modifier.fillMaxWidth(),
-            )
 
             Spacer(Modifier.height(8.dp))
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Stepper("−1 min", Modifier.weight(1f)) { minutes = (minutes - 1).coerceAtLeast(0) }
-                Stepper("+1 min", Modifier.weight(1f)) { minutes = (minutes + 1).coerceAtMost(599) }
-                Stepper("−10 s", Modifier.weight(1f)) {
-                    val total = (minutes * 60 + seconds - 10).coerceAtLeast(0)
-                    minutes = total / 60; seconds = total % 60
-                }
-                Stepper("+10 s", Modifier.weight(1f)) {
-                    val total = (minutes * 60 + seconds + 10).coerceAtMost(599 * 60)
-                    minutes = total / 60; seconds = total % 60
-                }
+                Stepper("−1 min", Modifier.weight(1f)) { seconds = (seconds - 60).coerceAtLeast(0) }
+                Stepper("+1 min", Modifier.weight(1f)) { seconds = (seconds + 60).coerceAtMost(MAX_SECONDS) }
+                Stepper("−10 s", Modifier.weight(1f)) { seconds = (seconds - 10).coerceAtLeast(0) }
+                Stepper("+10 s", Modifier.weight(1f)) { seconds = (seconds + 10).coerceAtMost(MAX_SECONDS) }
             }
 
-            Spacer(Modifier.height(16.dp))
-            QuickMinutes.chunked(5).forEach { row ->
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    row.forEach { m ->
-                        val selected = minutes == m && seconds == 0
-                        Button(
-                            onClick = { minutes = m; seconds = 0 },
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(48.dp),
-                            shape = RoundedCornerShape(14.dp),
-                            contentPadding = PaddingValues(0.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (selected) Coral else Color.White,
-                                contentColor = if (selected) Color.White else Ink,
-                            ),
-                        ) {
-                            Text(quickLabel(m), fontWeight = FontWeight.SemiBold, maxLines = 1)
-                        }
-                    }
-                }
+            Spacer(Modifier.height(10.dp))
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .clickable { keep = !keep }
+                    .padding(horizontal = 4.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Rounded.Star, null, tint = if (keep) Gold else InkSoft.copy(alpha = 0.35f))
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    "Garder en favori",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = Ink,
+                    modifier = Modifier.weight(1f),
+                )
+                Switch(
+                    checked = keep,
+                    onCheckedChange = { keep = it },
+                    colors = SwitchDefaults.colors(checkedTrackColor = Coral),
+                )
             }
 
             Spacer(Modifier.height(12.dp))
@@ -528,7 +693,8 @@ private fun AddTimerSheet(
                 onClick = {
                     val l = label
                     val ms = totalMs
-                    close { onStart(l, ms) }
+                    val k = keep
+                    close { onStart(l, ms, k) }
                 },
                 enabled = totalMs > 0,
                 modifier = Modifier
@@ -543,6 +709,80 @@ private fun AddTimerSheet(
             }
         }
     }
+
+    editing?.let { f ->
+        FavoriteDialog(
+            preset = f,
+            onDismiss = { editing = null },
+            onSave = { updated ->
+                TimerRepository.updateFavorite(f, updated)
+                editing = null
+            },
+            onDelete = {
+                TimerRepository.removeFavorite(f)
+                editing = null
+            },
+        )
+    }
+}
+
+@Composable
+private fun SectionTitle(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.titleSmall,
+        fontWeight = FontWeight.Bold,
+        color = InkSoft,
+        modifier = Modifier.padding(bottom = 8.dp),
+    )
+}
+
+@Composable
+private fun FavoriteDialog(
+    preset: Preset,
+    onDismiss: () -> Unit,
+    onSave: (Preset) -> Unit,
+    onDelete: () -> Unit,
+) {
+    var name by rememberSaveable { mutableStateOf(preset.label) }
+    var seconds by rememberSaveable { mutableIntStateOf((preset.durationMs / 1000L).toInt().coerceIn(1, MAX_SECONDS)) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Cream,
+        title = { Text("Modifier le favori") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it.take(40) },
+                    label = { Text("Recette") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(16.dp),
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(12.dp))
+                DurationWheels(
+                    totalSeconds = seconds,
+                    onChange = { seconds = it },
+                    itemHeight = 44.dp,
+                    fontSize = 30.sp,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onSave(Preset(name, seconds * 1000L)) },
+                enabled = name.isNotBlank() && seconds > 0,
+            ) { Text("Enregistrer", fontWeight = FontWeight.Bold, color = Coral) }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = onDelete) { Text("Supprimer", color = Color(0xFFD93025)) }
+                TextButton(onClick = onDismiss) { Text("Annuler", color = InkSoft) }
+            }
+        },
+    )
 }
 
 @Composable
