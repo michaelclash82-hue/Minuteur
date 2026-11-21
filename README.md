@@ -4,7 +4,7 @@ Application Android de minuteurs multiples pour la cuisine (batch cooking).
 
 - Autant de minuteurs que nécessaire, en même temps
 - Un nom par minuteur (la recette) et une couleur pour le repérer
-- Choix de la durée par roulettes heures : minutes : secondes, plus durées rapides et ±1 min / ±10 s
+- Choix de la durée par roulettes heures : minutes : secondes
 - Favoris (nom + durée) : un appui relance la recette, appui long pour modifier ou supprimer
 - Les 3 derniers minuteurs lancés proposés avec leur durée
 - Pause, +1 min, renommer (appui sur le nom), suppression avec « Annuler »

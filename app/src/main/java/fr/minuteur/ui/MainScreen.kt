@@ -509,14 +509,6 @@ private fun TimerCard(
     }
 }
 
-private val QuickMinutes = listOf(1, 2, 3, 5, 8, 10, 12, 15, 20, 25, 30, 40, 45, 60, 90)
-
-private fun quickLabel(m: Int): String = when {
-    m < 60 -> "$m min"
-    m % 60 == 0 -> "${m / 60} h"
-    else -> "${m / 60} h ${m % 60}"
-}
-
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun AddTimerSheet(
@@ -554,9 +546,27 @@ private fun AddTimerSheet(
         ) {
             Text("Nouveau minuteur", style = MaterialTheme.typography.headlineSmall, color = Ink)
 
+            Spacer(Modifier.height(14.dp))
+            OutlinedTextField(
+                value = label,
+                onValueChange = { label = it.take(40) },
+                label = { Text("Recette") },
+                placeholder = { Text("ex : Lasagnes") },
+                singleLine = true,
+                shape = RoundedCornerShape(16.dp),
+                keyboardOptions = KeyboardOptions(
+                    capitalization = KeyboardCapitalization.Sentences,
+                    imeAction = ImeAction.Done,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            Spacer(Modifier.height(16.dp))
+            DurationWheels(totalSeconds = seconds, onChange = { seconds = it })
+
             // Favoris : un appui lance directement, appui long pour modifier.
             if (favorites.isNotEmpty()) {
-                Spacer(Modifier.height(14.dp))
+                Spacer(Modifier.height(20.dp))
                 SectionTitle("Mes favoris")
                 Row(
                     Modifier.horizontalScroll(rememberScrollState()),
@@ -614,57 +624,6 @@ private fun AddTimerSheet(
             }
 
             Spacer(Modifier.height(16.dp))
-            OutlinedTextField(
-                value = label,
-                onValueChange = { label = it.take(40) },
-                label = { Text("Recette") },
-                placeholder = { Text("ex : Lasagnes") },
-                singleLine = true,
-                shape = RoundedCornerShape(16.dp),
-                keyboardOptions = KeyboardOptions(
-                    capitalization = KeyboardCapitalization.Sentences,
-                    imeAction = ImeAction.Done,
-                ),
-                modifier = Modifier.fillMaxWidth(),
-            )
-
-            Spacer(Modifier.height(16.dp))
-            DurationWheels(totalSeconds = seconds, onChange = { seconds = it })
-
-            Spacer(Modifier.height(14.dp))
-            Row(
-                Modifier.horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                QuickMinutes.forEach { m ->
-                    val selected = seconds == m * 60
-                    Button(
-                        onClick = { seconds = m * 60 },
-                        modifier = Modifier.height(44.dp),
-                        shape = RoundedCornerShape(14.dp),
-                        contentPadding = PaddingValues(horizontal = 14.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (selected) Coral else Color.White,
-                            contentColor = if (selected) Color.White else Ink,
-                        ),
-                    ) {
-                        Text(quickLabel(m), fontWeight = FontWeight.SemiBold, maxLines = 1)
-                    }
-                }
-            }
-
-            Spacer(Modifier.height(8.dp))
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Stepper("−1 min", Modifier.weight(1f)) { seconds = (seconds - 60).coerceAtLeast(0) }
-                Stepper("+1 min", Modifier.weight(1f)) { seconds = (seconds + 60).coerceAtMost(MAX_SECONDS) }
-                Stepper("−10 s", Modifier.weight(1f)) { seconds = (seconds - 10).coerceAtLeast(0) }
-                Stepper("+10 s", Modifier.weight(1f)) { seconds = (seconds + 10).coerceAtMost(MAX_SECONDS) }
-            }
-
-            Spacer(Modifier.height(10.dp))
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -783,16 +742,4 @@ private fun FavoriteDialog(
             }
         },
     )
-}
-
-@Composable
-private fun Stepper(text: String, modifier: Modifier, onClick: () -> Unit) {
-    FilledTonalButton(
-        onClick = onClick,
-        modifier = modifier.height(48.dp),
-        shape = RoundedCornerShape(14.dp),
-        contentPadding = PaddingValues(0.dp),
-    ) {
-        Text(text, fontWeight = FontWeight.SemiBold, maxLines = 1)
-    }
 }
